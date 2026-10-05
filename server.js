@@ -1,20 +1,38 @@
 const express = require('express');
-const cors = require('cors');
-require('dotenv').config();
+const { Pool } = require('pg');
 
 const app = express();
-app.use(cors());
-app.use(express.json());
+const PORT = process.env.PORT || 10000;
 
-// Endpoint اختبارية للتأكد من تشغيل Gateway
-app.get('/', (req, res) => {
-  res.json({ 
-    status: "ON", 
-    message: "API Gateway is running successfully" 
-  });
+// إعداد الاتصال بقاعدة البيانات عبر الـ Pooler
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: {
+    rejectUnauthorized: false // مطلوب لتشفير SSL مع سحابة Supabase
+  }
 });
 
-const PORT = process.env.PORT || 3000;
+app.use(express.json());
+
+// مسار الفحص الرئيسي والتأكد من الاتصال بقاعدة البيانات
+app.get('/', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT NOW()');
+    res.json({
+      status: "ON",
+      message: "API Gateway is running & connected to Supabase successfully!",
+      db_time: result.rows[0].now
+    });
+  } catch (err) {
+    console.error('Database Connection Error:', err);
+    res.status(500).json({
+      status: "ERROR",
+      message: "Failed to connect to Supabase Database",
+      error: err.message
+    });
+  }
+});
+
 app.listen(PORT, () => {
-  console.log(`API Gateway listening on port ${PORT}`);
+  console.log(`Server is running on port ${PORT}`);
 });
