@@ -14,10 +14,10 @@ const pool = new Pool({
 
 app.use(express.json());
 
-// دالة وسيطة للتحقق من مفتاح الدخول (JWT Middleware)
+// دالة التحقق من مفتاح الدخول (JWT Middleware)
 function authenticateToken(req, res, next) {
   const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1]; // استخراج التوكين من Bearer TOKEN
+  const token = authHeader && authHeader.split(' ')[1];
 
   if (!token) {
     return res.status(401).json({ error: "غير مصرح: يجب تقديم توكين الدخول" });
@@ -97,7 +97,7 @@ app.post('/login', async (req, res) => {
   }
 });
 
-// 4. مسار آمن لقراءة رصيد المحفظة (يتطلب Token)
+// 4. قراءة رصيد المحفظة
 app.get('/balance', authenticateToken, async (req, res) => {
   try {
     const walletResult = await pool.query(
@@ -115,6 +115,84 @@ app.get('/balance', authenticateToken, async (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ error: "خطأ في قراءة بيانات المحفظة" });
+  }
+});
+
+// 5. التحويل المالي الآمن بين المحافظ
+app.post('/transfer', authenticateToken, async (req, res) => {
+  const { recipientEmail, amount } = req.body;
+  const senderUserId = req.user.userId;
+
+  const transferAmount = parseFloat(amount);
+  if (isNaN(transferAmount) || transferAmount <= 0) {
+    return res.status(400).json({ error: "مبلغ التحويل غير صالح" });
+  }
+
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    // أ) جلب بيانات المرسل والتأكد من وجود رصيد كافٍ مع قفل السطر للتعديل
+    const senderWalletResult = await client.query(
+      'SELECT balance FROM wallets WHERE user_id = $1 FOR UPDATE',
+      [senderUserId]
+    );
+
+    if (senderWalletResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: "محفظة المرسل غير موجودة" });
+    }
+
+    const currentBalance = parseFloat(senderWalletResult.rows[0].balance);
+    if (currentBalance < transferAmount) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: "الرصيد غير كافٍ لإتمام العملية" });
+    }
+
+    // ب) البحث عن المستلم
+    const recipientUserResult = await client.query(
+      'SELECT id FROM users WHERE email = $1',
+      [recipientEmail]
+    );
+
+    if (recipientUserResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: "حساب المستلم غير موجود" });
+    }
+
+    const recipientUserId = recipientUserResult.rows[0].id;
+
+    if (recipientUserId === senderUserId) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: "لا يمكنك التحويل لنفس المحفظة" });
+    }
+
+    // ج) خصم المبلغ من المرسل
+    await client.query(
+      'UPDATE wallets SET balance = balance - $1 WHERE user_id = $2',
+      [transferAmount, senderUserId]
+    );
+
+    // د) إضافة المبلغ للمستلم
+    await client.query(
+      'UPDATE wallets SET balance = balance + $1 WHERE user_id = $2',
+      [transferAmount, recipientUserId]
+    );
+
+    await client.query('COMMIT');
+
+    res.json({
+      message: "تم التحويل بنجاح!",
+      transferredAmount: transferAmount,
+      recipient: recipientEmail
+    });
+
+  } catch (err) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ error: "فشلت عملية التحويل", details: err.message });
+  } finally {
+    client.release();
   }
 });
 
