@@ -14,7 +14,25 @@ const pool = new Pool({
 
 app.use(express.json());
 
-// 1. مسار الفحص الرئيسية
+// دالة وسيطة للتحقق من مفتاح الدخول (JWT Middleware)
+function authenticateToken(req, res, next) {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1]; // استخراج التوكين من Bearer TOKEN
+
+  if (!token) {
+    return res.status(401).json({ error: "غير مصرح: يجب تقديم توكين الدخول" });
+  }
+
+  jwt.verify(token, JWT_SECRET, (err, user) => {
+    if (err) {
+      return res.status(403).json({ error: "التوكين غير صالحة أو منتهية الصلاحية" });
+    }
+    req.user = user;
+    next();
+  });
+}
+
+// 1. مسار الفحص
 app.get('/', async (req, res) => {
   try {
     const result = await pool.query('SELECT NOW()');
@@ -33,7 +51,6 @@ app.post('/register', async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    // تشفير كلمة المرور
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
 
@@ -68,18 +85,36 @@ app.post('/login', async (req, res) => {
     }
 
     const user = userResult.rows[0];
-
     const validPassword = await bcrypt.compare(password, user.password_hash);
     if (!validPassword) {
       return res.status(401).json({ error: "البريد أو كلمة المرور غير صحيحة" });
     }
 
-    // إصدار Token صالح لمدة 7 أيام
     const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: '7d' });
-
     res.json({ message: "تم تسجيل الدخول بنجاح", token });
   } catch (err) {
     res.status(500).json({ error: "خطأ في السيرفر" });
+  }
+});
+
+// 4. مسار آمن لقراءة رصيد المحفظة (يتطلب Token)
+app.get('/balance', authenticateToken, async (req, res) => {
+  try {
+    const walletResult = await pool.query(
+      'SELECT id as wallet_id, balance, currency, created_at FROM wallets WHERE user_id = $1',
+      [req.user.userId]
+    );
+
+    if (walletResult.rows.length === 0) {
+      return res.status(404).json({ error: "المحفظة غير موجودة" });
+    }
+
+    res.json({
+      message: "تم جلب بيانات المحفظة بنجاح",
+      wallet: walletResult.rows[0]
+    });
+  } catch (err) {
+    res.status(500).json({ error: "خطأ في قراءة بيانات المحفظة" });
   }
 });
 
